@@ -1,5 +1,5 @@
 .DS_Store
-static/*.drawio
+.claude
 scripts/.DS_Store
 scripts/__pycache__
 scripts/logs

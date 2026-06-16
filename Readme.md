@@ -1,5 +1,13 @@
 # Semantic Segmentation of 3D Point Clouds and Floor Plan Prediction
 
+<div align="center">
+
+| 3D Point Cloud Scan | | Engineering Floor Plan |
+|:---:|:---:|:---:|
+| <img src="static/in.png" width="340"> | **&#10132;** | <img src="static/floor_plan.png" width="430"> |
+
+</div>
+
 ## Table of Contents
 
 1.  [Overview](#1-overview)
@@ -12,6 +20,7 @@
     *   [Script: Planar Cloud Extraction (Segmentation Only)](#32-script-planar-cloud-extraction-segmentation-only)
     *   [Script: Floor Plan Extraction (Full Pipeline)](#33-script-floor-plan-extraction-full-pipeline)
     *   [Script: Planar Mesh Reconstruction](#34-script-planar-mesh-reconstruction)
+    *   [Configuration](#35-configuration)
 
 ---
 
@@ -23,7 +32,7 @@ Our approach leverages a multi-stage process that combines deep learning with cl
 
 1.  **Semantic Understanding:** The pipeline first employs a powerful 3D semantic segmentation model (**RandLANet**) to assign a categorical label (e.g., `wall`, `floor`, `door`, `clutter`) to every point in the cloud.
 2.  **Geometric Refinement:** Recognizing that deep learning models can produce noisy or incomplete segmentations, a crucial post-processing step uses **RANSAC** (RANdom SAmple Consensus) to fit geometric primitives (planes and cylinders) to the structural elements. This allows the system to correct misclassifications and intelligently reclaim points from the `clutter` category.
-3.  **Vectorized Output:** Finally, the refined 3D structural point cloud is projected onto a 2D plane. Image processing techniques, including the **Hough Transform**, are used to detect lines and create a clean, vectorized floor plan.
+3.  **Engineering Floor Plan:** Finally, the refined 3D structural cloud is reduced to a metric, Manhattan-regularized room polygon and emitted as a dimensioned technical drawing (**DXF/PDF**) and a parametric **IFC/BIM** model — walls, openings, dimensions, and a legend, with no raster/Hough step.
 
 This hybrid methodology ensures that the final output is not only semantically informed but also geometrically robust, resulting in high-quality architectural plans from raw scan data.
 
@@ -181,60 +190,43 @@ Initial Result:
 ---
 ### 2.3. Stage 3: 2D Floor Plan Generation
 
-With a clean, refined set of 3D structural points, the final stage is to convert this data into a 2D vectorized floor plan. This process, encapsulated in the `pcd_to_plan` function, involves projecting the points, rasterizing them into an image, and then extracting geometric lines from that image.
+With a clean, refined set of 3D structural points, the final stage reconstructs a metric room polygon and renders it as an **engineering technical drawing** (DXF/PDF) and a parametric **IFC/BIM** model. This is implemented in `floorplan_sota.py` (`generate`); unlike a raster Hough pipeline, every coordinate stays in metric units, so the output is measurable and CAD-ready. All tunable parameters live in [`configs/floorplan.yml`](configs/floorplan.yml) — there are no hardcoded numbers in the code.
 
-#### 2.3.1. 2D Projection and Occupancy Grid Creation
+#### 2.3.1. Manhattan Frame and Room Polygon
 
-The first step is to transform the 3D data into a 2D representation suitable for image processing.
-
-1.  **Horizontal Slicing:** To simulate a standard architectural blueprint view, we take a horizontal cross-section of the 3D point cloud. A slice is defined by a `SLICE_HEIGHT` and a `SLICE_THICKNESS`. All points $p_i = (x_i, y_i, z_i)$ from the refined structural cloud $P'_{\text{struct}}$ that fall within this vertical range are selected.
-
-Let $h$ be `SLICE_HEIGHT` and $t$ be `SLICE_THICKNESS`. A point $p_i$ is included in the slice $P_{\text{slice}}$ if:
+1.  **Dominant Orientation (`vertical_wall_lines`, `dominant_angle`):** Iterative RANSAC on the wall/window/door points recovers the vertical planes; each contributes a 2D line with unit normal $\mathbf{n}=(n_x,n_y)$. The dominant wall normal defines the room's Manhattan frame:
 ```math
-(h - t/2) \le z_i \le (h + t/2)
+\theta_0 = \operatorname{atan2}(n_y, n_x) \bmod \tfrac{\pi}{2}
 ```
+All geometry is computed in this frame via the rotation $R(-\theta_0)$ and mapped back with $R(\theta_0)$.
 
-2.  **Projection:** The 3D points in $P_{\text{slice}}$ are then projected onto the XY-plane by simply discarding their Z-coordinate, creating a 2D point set, $P_{2D}$.
-```math 
-(x_i, y_i, z_i) \to (x'_i, y'_i) = (x_i, y_i)
-``` 
-
-3.  **Rasterization (`create_occupancy_grid`):** The 2D points are converted into a binary image called an occupancy grid.
-*   **Grid Definition:** The process first determines the spatial extent of the 2D points (a bounding box) and creates a grid of pixels, where each pixel represents a physical area defined by `GRID_RESOLUTION`.
-*   **Point-to-Pixel Mapping:** Each 2D point $(x'_i, y'_i)$ is mapped to a discrete pixel coordinate $(u_i, v_i)$ in the grid. This transformation involves a translation and scaling:
-```math 
-u_i = \left\lfloor \frac{x'_i - x_{\min}}{\text{resolution}} \right\rfloor, \quad v_i = \left\lfloor \frac{y'_i - y_{\min}}{\text{resolution}} \right\rfloor
+2.  **Floor Footprint Rasterization (`room_from_floor_mask`):** The floor points are rotated into the Manhattan frame and rasterized into a binary mask at resolution $r$ (`room.mask_res`). Each point maps to a pixel:
+```math
+u_i = \left\lfloor \frac{x_i - x_{\min}}{r} \right\rfloor, \quad v_i = \left\lfloor \frac{y_i - y_{\min}}{r} \right\rfloor
 ```
-*   **Occupancy:** The pixel at each coordinate $(u_i, v_i)$ is marked as occupied (set to a value of 255).
-*   **Cleaning:** A **morphological closing** operation (`cv2.morphologyEx` with `cv2.MORPH_CLOSE`) is applied to the grid. This computer vision technique first dilates the image (thickening features) and then erodes it (thinning them back). The net effect is the closure of small gaps and holes in the detected walls, creating more continuous features for the next step.
+A **morphological closing** fills furniture gaps, and the largest external contour is taken as the raw room boundary.
 
-#### 2.3.2. Vectorization via Hough Transform and Refinement
+3.  **Rectilinear Regularization (`rectilinearize`):** The contour is simplified (`cv2.approxPolyDP`) and each edge is locked to the nearest axis; a vertex is replaced by the intersection of its two adjacent axis-locked edges, producing clean right angles. An edge $(\mathbf{a},\mathbf{b})$ is treated as horizontal when:
+```math
+|b_x - a_x| \ge |b_y - a_y|
+```
+The result is a watertight, metric room polygon $P_{\text{room}}$ that handles rectangular and L/T-shaped rooms. If it degenerates (area outside `room.area_lo`–`room.area_hi` of the floor bounding box), the pipeline falls back to the Manhattan-oriented bounding box (`room_from_floor_obb`). The method is selectable via `method: auto | floor_mask | obb`.
 
-The occupancy grid is a raster image. To create a true floor plan, we must convert it back into a vector format—a set of lines.
+#### 2.3.2. Architectural Elements
 
-1.  **Line Segment Detection (`cv2.HoughLinesP`):** The **Probabilistic Hough Transform** is applied to the cleaned occupancy grid. Unlike the standard Hough Transform, this algorithm directly detects and returns the endpoints of line segments, which is more efficient for this task. It is governed by key parameters:
-*   `HOUGH_THRESHOLD`: The minimum number of collinear points required to form a line.
-*   `HOUGH_MIN_LINE_LENGTH`: The minimum length of a line in pixels to be considered valid.
-*   `HOUGH_MAX_LINE_GAP`: The maximum allowed gap between two points on the same line.
+1.  **Openings (`detect_openings`):** For each edge with direction $\hat{\mathbf{u}}$, door/window points within `openings.band` of the edge are projected onto it via $t=(\mathbf{p}-\mathbf{a})\cdot\hat{\mathbf{u}}$. The opening span is the robust $[\text{pct\_lo}, \text{pct\_hi}]$ percentile range of $t$, and its sill/head come from the $z$-range of those points.
 
-2.  **Line Merging (`merge_lines`):** The raw output from the Hough Transform is often fragmented into many small, collinear segments. This step merges them into longer, more coherent lines. Two lines are considered candidates for merging if:
-*   **Angle Similarity:** The difference in their angles is below `MERGE_ANGLE_TOLERANCE`.
-*   **Proximity:** The perpendicular distance from an endpoint of one line to the infinite line defined by the other is below `MERGE_DISTANCE_TOLERANCE`. The distance from a point $p_1$ to a line passing through points $p_a$ and $p_b$ is given by:
-```math 
-d(p_1, \text{line}(p_a, p_b)) = \frac{\| (p_1 - p_a) \times (p_b - p_a) \|}{\| p_b - p_a \|}
-``` 
-Once a cluster of mergeable lines is identified, `cv2.fitLine` is used to compute a single best-fit line through all their constituent points, creating a new, unified line segment.
+2.  **Columns (`detect_columns`):** Column points are clustered with DBSCAN; compact clusters lying strictly inside $P_{\text{room}}$ are kept as circular columns, discarding wall fragments.
 
-3.  **Corner Snapping (`connect_corners`):** To create architecturally clean corners and intersections, this final step adjusts the endpoints of the merged lines.
-*   The algorithm identifies clusters of line endpoints that are closer to each other than the `SNAP_TOLERANCE`. The distance between two endpoints $e_i = (x_i, y_i)$ and $e_j = (x_j, y_j)$ is the standard Euclidean distance:
-```math 
-d(e_i, e_j) = \sqrt{(x_i - x_j)^2 + (y_i - y_j)^2} < \text{SNAP\_TOLERANCE}
-``` 
-*   For each identified cluster, a new corner point is calculated by finding the centroid (average position) of all endpoints in that cluster.
-*   The endpoints of the original lines are then updated to "snap" to this new, single corner point, ensuring that walls connect perfectly.
+#### 2.3.3. Engineering Technical Drawing
 
-Final Result: 
-![Final Floor Plan](static/floor_plan.png)
+The polygon and elements are emitted by `export_drawing` (sheet) and `export_ifc` (BIM). Coordinates are scaled from metres to millimetres, $c_{\text{mm}} = 1000\,c_{\text{m}}$, and drawn on standard CAD layers with wall poché (hatch), door swings, and window symbols.
+
+*   **Dimensions:** every wall run and the overall extents are auto-dimensioned. For an edge the annotated length is $L=\lVert \mathbf{b}-\mathbf{a} \rVert$, and the overall sizes are $W=x_{\max}-x_{\min}$ and $H=y_{\max}-y_{\min}$ (in mm).
+*   **Sheet:** a legend, title block (scale `drawing.scale`, units mm), scale bar, and north arrow are added. Outputs are **DXF** (editable CAD), **PDF/PNG** (rendered sheet), and **IFC** (parametric walls, slabs, openings, doors, windows, and columns).
+
+Final Result:
+![Final Engineering Floor Plan](static/floor_plan.png)
 
 ---
 ## 3. Usage Guide
@@ -267,13 +259,13 @@ With the environment set up, you can now run the processing scripts.
 
 This script runs only the initial semantic segmentation stage. It processes an input point cloud and saves the raw point clouds for major structural categories (floor, walls, etc.) and all other categories into separate files. No RANSAC refinement is performed.
 
-*   **Script:** `segmentation_pcd_extraction.py`
+*   **Script:** `segmentation_pcd_extract.py`
 *   **Arguments:**
     *   `--data_path`: **(Required)** Path to the input point cloud file (`.ply`).
     *   `--output_dir`: **(Required)** Directory where the output `.ply` files (e.g., `walls.ply`, `floor.ply`, `others.ply`) will be stored.
 *   **Example:**
     ```bash
-    python segmentation_pcd_extraction.py --data_path ../data/conferenceRoom_1.ply --output_dir ../output/segmented_parts/
+    python segmentation_pcd_extract.py --data_path ../data/conferenceRoom_1.ply --output_dir ../output/segmented_parts/
     ```
 
 ### 3.3. Script: Floor Plan Extraction (Full Pipeline)
@@ -283,13 +275,13 @@ This is the main script that executes the entire pipeline: from semantic segment
 *   **Script:** `pcd_to_floorplan.py`
 *   **Arguments:**
     *   `--data_path`: **(Required)** Path to the input point cloud file (`.ply`).
-    *   `--output_dir`: **(Required)** Directory where the final floor plan image (`.png`) will be saved.
+    *   `--output_dir`: **(Required)** Directory for the floor-plan outputs — `floor_plan.dxf` (CAD), `floor_plan.pdf`/`.png` (rendered sheet), and `model.ifc` (BIM). See [Configuration](#35-configuration) for the standalone run and config.
     *   `--refine_cylinders`: **(Optional Flag)** Enables the RANSAC cylinder fitting routine for columns and beams. This can improve results in rooms with columns but will increase processing time.
     *   `--vis_prediction`: **(Optional Flag)** Opens the Open3D-ML visualizer to show the raw semantic segmentation results on the point cloud.
     *   `--vis_open3d`: **(Optional Flag)** Opens a visualizer to compare the structural point cloud before and after RANSAC refinement.
 *   **Example:**
     ```bash
-    python floor_plan_main.py \
+    python pcd_to_floorplan.py \
       --data_path ../data/conferenceRoom_1.ply \
       --output_dir ../output/ \
       --refine_cylinders \
@@ -298,7 +290,7 @@ This is the main script that executes the entire pipeline: from semantic segment
 
 ### 3.4. Script: Planar Mesh Reconstruction
 
-This utility script takes individual point clouds of structural elements (like those generated by `segmentation_pcd_extraction.py`) and attempts to reconstruct a 3D mesh from them.
+This utility script takes individual point clouds of structural elements (like those generated by `segmentation_pcd_extract.py`) and attempts to reconstruct a 3D mesh from them.
 
 *   **Script:** `reconstruct.py`
 *   **Arguments:**
@@ -320,3 +312,37 @@ This utility script takes individual point clouds of structural elements (like t
       -o ../output/reconstructed_mesh.ply \
       -m poisson
     ```
+
+
+---
+
+### 3.5. Configuration
+
+Two YAML files drive the pipeline.
+
+**`configs/randlanet_s3dis.yml`** (Stage 1 — semantic segmentation), loaded by `load_assets.get_pipeline` to build the Open3D-ML RandLA-Net model:
+*   `dataset`: S3DIS settings — `num_points` (points sampled per inference window), `class_weights`, `test_area_idx`, `cache_dir`.
+*   `model`: RandLA-Net architecture — `num_neighbors`, `num_layers`, `num_classes` (13 S3DIS classes), `sub_sampling_ratio`, `in_channels`, `dim_features`, `grid_size`; `ckpt_path` is set automatically.
+*   `pipeline`: `SemanticSegmentation` runtime — `batch_size`, `val_batch_size`, optimizer `lr`, `scheduler_gamma`, `main_log_dir`.
+
+**`configs/floorplan.yml`** (Stage 3 — floor plan), loaded by `floorplan_sota.generate`. Every result-affecting number lives here, nothing is hardcoded:
+*   `method`: `auto | floor_mask | obb` — room reconstruction method (`auto` = `floor_mask` with `obb` fallback).
+*   `wall_thickness`: drawn / IFC wall thickness (m).
+*   `walls`: vertical-plane RANSAC (`voxel`, `ransac_dist`, `vertical_tol`, `max_planes`, `min_inliers`).
+*   `room`: floor-mask reconstruction (`mask_res`, `morph_kernel`, `morph_iters`, `approx_tol`, `simplify`, `area_lo`, `area_hi`).
+*   `openings`: door/window detection (`band`, `min_points`, `pct_lo`, `pct_hi`, `min_width`).
+*   `columns`: DBSCAN column detection (`eps`, `min_points`, `r_min`, `r_max`, `interior_margin`).
+*   `ceiling_fallback_height`: storey height used when no ceiling points (m).
+*   `drawing`: `scale` (sheet 1:N) and `door_swing_max` (door arc cap, m).
+
+Generate the floor plan from the segmented point clouds (run from `scripts/`):
+```bash
+python floorplan_sota.py --config ../configs/floorplan.yml \
+  --seg_dir output/segmented_parts --out_dir output/sota
+# switch reconstruction method without touching code:
+python floorplan_sota.py --method obb
+```
+Outputs: `floor_plan.dxf` (editable CAD), `floor_plan.pdf`/`.png` (rendered sheet), `model.ifc` (BIM), `floorplan.json` (metrics). A self-contained smoke test verifies the full path on a synthetic room:
+```bash
+python test_floorplan.py
+```

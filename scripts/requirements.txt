@@ -80,3 +80,7 @@ tzdata==2024.2
 urllib3==2.2.3
 Werkzeug==3.0.4
 zipp==3.20.2
+opencv-python==4.13.0.92
+shapely==2.0.7
+ezdxf==1.1.4
+# ifcopenshell==0.7.0 (IFC/BIM export) -- install via: conda install -c conda-forge ifcopenshell

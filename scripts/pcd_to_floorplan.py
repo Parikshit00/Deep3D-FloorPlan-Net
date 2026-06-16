@@ -7,7 +7,7 @@ from load_assets import *
 import matplotlib.pyplot as plt
 import pickle
 import copy
-from floorplan_utils import pcd_to_plan
+from floorplan_sota import generate, load_cfg, DEFAULT_CFG
 
 s3dis_labels = get_s3dis_labels()
 FURNITURE_CLASSES = [7, 8, 9, 10, 11]
@@ -242,7 +242,11 @@ def save_floor_plan(pc_names, pcs, pipeline_r, vis_open3d, vizualize_prediction,
                 window_name="Final Breakdown processed"
             )
         print("\n--- Final Stage: Running the PCD to Floorplan Pipeline ---")
-        pcd_to_plan(pcd=pcd_for_floorplan, out_path = output_path)
+        empty = o3d.geometry.PointCloud()
+        clouds = {"floor": final_pcds.get("floor", empty), "ceiling": initial_pcds.get("ceiling", empty),
+                  "walls": final_pcds.get("wall", empty), "window": final_pcds.get("window", empty),
+                  "door": final_pcds.get("door", empty), "column": final_pcds.get("column", empty)}
+        generate(clouds, output_path, load_cfg(DEFAULT_CFG))
         print("DONE! Saved the floor plan results!")
         print("="*20)
     if visualize_prediction==True:

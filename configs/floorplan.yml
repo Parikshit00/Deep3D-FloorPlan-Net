@@ -1,0 +1,38 @@
+method: auto                  # auto | floor_mask | obb  (auto = floor_mask, fall back to obb)
+wall_thickness: 0.10          # metres
+
+walls:
+  voxel: 0.04                 # downsample size (m) before plane RANSAC
+  ransac_dist: 0.03           # plane inlier distance (m)
+  vertical_tol: 0.3           # |normal_z| below this counts as a vertical wall
+  max_planes: 14
+  min_inliers: 400
+
+room:
+  mask_res: 0.04              # floor raster cell size (m)
+  morph_kernel: 5             # morphological close kernel (px)
+  morph_iters: 4
+  approx_tol: 0.12            # contour simplification tolerance (m)
+  simplify: 0.02              # polygon simplify tolerance (m)
+  area_lo: 0.2                # accept mask room if area in [lo,hi]*floor_bbox, else fall back
+  area_hi: 1.3
+
+openings:
+  band: 0.20                  # max perpendicular distance of a point to the wall edge (m)
+  min_points: 200
+  pct_lo: 5                   # opening span = [pct_lo, pct_hi] percentile along the edge
+  pct_hi: 95
+  min_width: 0.3              # discard openings narrower than this (m)
+
+columns:
+  eps: 0.2                    # DBSCAN neighbourhood (m)
+  min_points: 200
+  r_min: 0.05                 # accepted column radius range (m)
+  r_max: 0.6
+  interior_margin: 0.25       # column must sit this far inside the room (m)
+
+ceiling_fallback_height: 2.5  # storey height used when no ceiling points (m)
+
+drawing:
+  scale: 50                   # sheet scale 1:N
+  door_swing_max: 1.0         # cap door swing arc radius (m)
