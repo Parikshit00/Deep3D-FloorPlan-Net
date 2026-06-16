@@ -195,9 +195,11 @@ With a clean, refined set of 3D structural points, the final stage reconstructs 
 #### 2.3.1. Manhattan Frame and Room Polygon
 
 1.  **Dominant Orientation (`vertical_wall_lines`, `dominant_angle`):** Iterative RANSAC on the wall/window/door points recovers the vertical planes; each contributes a 2D line with unit normal $\mathbf{n}=(n_x,n_y)$. The dominant wall normal defines the room's Manhattan frame:
+
 ```math
-\theta_0 = \operatorname{atan2}(n_y, n_x) \bmod \tfrac{\pi}{2}
+\theta_0 = \text{atan2}(n_y, n_x) \bmod \tfrac{\pi}{2}
 ```
+
 All geometry is computed in this frame via the rotation $R(-\theta_0)$ and mapped back with $R(\theta_0)$.
 
 2.  **Floor Footprint Rasterization (`room_from_floor_mask`):** The floor points are rotated into the Manhattan frame and rasterized into a binary mask at resolution $r$ (`room.mask_res`). Each point maps to a pixel:
@@ -214,7 +216,7 @@ The result is a watertight, metric room polygon $P_{\text{room}}$ that handles r
 
 #### 2.3.2. Architectural Elements
 
-1.  **Openings (`detect_openings`):** For each edge with direction $\hat{\mathbf{u}}$, door/window points within `openings.band` of the edge are projected onto it via $t=(\mathbf{p}-\mathbf{a})\cdot\hat{\mathbf{u}}$. The opening span is the robust $[\text{pct\_lo}, \text{pct\_hi}]$ percentile range of $t$, and its sill/head come from the $z$-range of those points.
+1.  **Openings (`detect_openings`):** For each edge with direction $\hat{\mathbf{u}}$, door/window points within `openings.band` of the edge are projected onto it via $t=(\mathbf{p}-\mathbf{a})\cdot\hat{\mathbf{u}}$. The opening span is the robust percentile range of $t$ (the configurable `pct_lo`–`pct_hi` band), and its sill/head come from the $z$-range of those points.
 
 2.  **Columns (`detect_columns`):** Column points are clustered with DBSCAN; compact clusters lying strictly inside $P_{\text{room}}$ are kept as circular columns, discarding wall fragments.
 
