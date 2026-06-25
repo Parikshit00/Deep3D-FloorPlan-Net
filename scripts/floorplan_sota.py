@@ -85,14 +85,25 @@ def rectilinearize(v):
             out.append(list(v[i]))
     return np.array(out)
 
-def room_from_floor_mask(floor_pts, ang, r):
+def room_from_floor_mask(floor_pts, wall_pts, ang, r):
     if len(floor_pts) == 0:
         return None
     aligned = rot(floor_pts, -ang)
     mn = aligned.min(0)
     g = np.floor((aligned - mn) / r["mask_res"]).astype(int)
-    mask = np.zeros((g[:, 1].max() + 3, g[:, 0].max() + 3), np.uint8)
+    H, W = g[:, 1].max() + 3, g[:, 0].max() + 3
+    mask = np.zeros((H, W), np.uint8)
     mask[g[:, 1] + 1, g[:, 0] + 1] = 255
+    if r["seal_with_walls"] and len(wall_pts):
+        wg = np.floor((rot(wall_pts, -ang) - mn) / r["mask_res"]).astype(int) + 1
+        wg[:, 0] = np.clip(wg[:, 0], 0, W - 1)
+        wg[:, 1] = np.clip(wg[:, 1], 0, H - 1)
+        seal = np.zeros((H, W), np.uint8)
+        seal[wg[:, 1], wg[:, 0]] = 255
+        if r["wall_dilate"] > 0:
+            d = r["wall_dilate"] * 2 + 1
+            seal = cv2.dilate(seal, cv2.getStructuringElement(cv2.MORPH_RECT, (d, d)))
+        mask = cv2.bitwise_or(mask, seal)
     k = cv2.getStructuringElement(cv2.MORPH_RECT, (r["morph_kernel"], r["morph_kernel"]))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=r["morph_iters"])
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -223,7 +234,7 @@ def dim_style(doc, th_txt):
         ds.dxf.dimgap = th_txt * 0.3
         ds.dxf.dimdec = 0
 
-def add_dims(msp, ext_mm, cen, off, th_txt):
+def add_dims(msp, ext_mm, cen, off):
     for a, b in zip(ext_mm[:-1], ext_mm[1:]):
         a, b = np.array(a), np.array(b)
         L = np.linalg.norm(b - a)
@@ -238,7 +249,7 @@ def add_dims(msp, ext_mm, cen, off, th_txt):
         msp.add_linear_dim(base=tuple(base), p1=tuple(a), p2=tuple(b), angle=ang,
                            dimstyle="PLAN", dxfattribs={"layer": "A-DIMS"}).render()
 
-def add_overall_dims(msp, bounds_mm, off, th_txt):
+def add_overall_dims(msp, bounds_mm, off):
     x0, y0, x1, y1 = bounds_mm
     msp.add_linear_dim(base=(0, y0 - off), p1=(x0, y0), p2=(x1, y0), angle=0,
                        dimstyle="PLAN", dxfattribs={"layer": "A-DIMS"}).render()
@@ -311,7 +322,7 @@ def add_title_block(msp, x0, y0, w, h, th_txt, area, scale):
         msp.add_text(v, height=th_txt * 0.8, dxfattribs={"layer": "A-TTLB"}).set_placement(
             (x0 + w * 0.4, ry + rh / 2), align=TextEntityAlignment.MIDDLE_LEFT)
 
-def export_drawing(out_base, room, openings, columns, floor_z, ceil_z, cfg):
+def export_drawing(out_base, room, openings, columns, cfg):
     thickness = cfg["wall_thickness"]
     scale = cfg["drawing"]["scale"]
     swing = cfg["drawing"]["door_swing_max"] * S
@@ -340,9 +351,9 @@ def export_drawing(out_base, room, openings, columns, floor_z, ceil_z, cfg):
         msp.add_text(f"C{i + 1}", height=th_txt * 0.7, dxfattribs={"layer": "A-COLS"}).set_placement(
             center, align=TextEntityAlignment.MIDDLE_CENTER)
 
-    add_dims(msp, [tuple(c) for c in ext], cen, th + th_txt * 1.5, th_txt)
+    add_dims(msp, [tuple(c) for c in ext], cen, th + th_txt * 1.5)
     overall_off = th + th_txt * 5.0
-    add_overall_dims(msp, (x0, y0, x1, y1), overall_off, th_txt)
+    add_overall_dims(msp, (x0, y0, x1, y1), overall_off)
 
     msp.add_mtext(f"ROOM\\P{room.area:.1f} m2", dxfattribs={
         "layer": "A-ANNO", "char_height": th_txt, "attachment_point": 5}).set_location(tuple(cen))
@@ -491,7 +502,7 @@ def reconstruct(clouds, cfg):
     fbb = (floor_pts.max(0) - floor_pts.min(0)) if len(floor_pts) else np.zeros(2)
     area = float(fbb[0] * fbb[1])
     method = cfg["method"]
-    room = None if method == "obb" else room_from_floor_mask(floor_pts, ang, cfg["room"])
+    room = None if method == "obb" else room_from_floor_mask(floor_pts, xy(clouds["walls"]), ang, cfg["room"])
     used = "floor_mask"
     bad = room is None or not (cfg["room"]["area_lo"] * area <= room.area <= cfg["room"]["area_hi"] * area)
     if room is None or (bad and method != "floor_mask"):
@@ -504,7 +515,7 @@ def reconstruct(clouds, cfg):
 def generate(clouds, out_dir, cfg):
     os.makedirs(out_dir, exist_ok=True)
     room, openings, columns, floor_z, ceil_z, method = reconstruct(clouds, cfg)
-    export_drawing(os.path.join(out_dir, "floor_plan"), room, openings, columns, floor_z, ceil_z, cfg)
+    export_drawing(os.path.join(out_dir, "floor_plan"), room, openings, columns, cfg)
     export_ifc(os.path.join(out_dir, "model.ifc"), room, openings, columns, floor_z, ceil_z, cfg["wall_thickness"])
     info = {"method": method, "area_m2": round(room.area, 3),
             "bounds": [round(v, 3) for v in room.bounds],

@@ -16,6 +16,8 @@ room:
   simplify: 0.02              # polygon simplify tolerance (m)
   area_lo: 0.2                # accept mask room if area in [lo,hi]*floor_bbox, else fall back
   area_hi: 1.3
+  seal_with_walls: true       # rasterize wall points to close furniture-induced floor holes
+  wall_dilate: 2              # px dilation of the wall seal (robust against small gaps)
 
 openings:
   band: 0.20                  # max perpendicular distance of a point to the wall edge (m)

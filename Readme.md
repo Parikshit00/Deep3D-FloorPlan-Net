@@ -206,7 +206,7 @@ All geometry is computed in this frame via the rotation $R(-\theta_0)$ and mappe
 ```math
 u_i = \left\lfloor \frac{x_i - x_{\min}}{r} \right\rfloor, \quad v_i = \left\lfloor \frac{y_i - y_{\min}}{r} \right\rfloor
 ```
-A **morphological closing** fills furniture gaps, and the largest external contour is taken as the raw room boundary.
+A **morphological closing** fills furniture gaps, and the largest external contour is taken as the raw room boundary. Wall points are rasterized into the same mask (`room.seal_with_walls`) to **seal furniture-induced floor holes** — e.g. a removed sofa against a wall, whose occluded floor would otherwise become a boundary notch — turning such holes into enclosed regions that the external contour ignores.
 
 3.  **Rectilinear Regularization (`rectilinearize`):** The contour is simplified (`cv2.approxPolyDP`) and each edge is locked to the nearest axis; a vertex is replaced by the intersection of its two adjacent axis-locked edges, producing clean right angles. An edge $(\mathbf{a},\mathbf{b})$ is treated as horizontal when:
 ```math
