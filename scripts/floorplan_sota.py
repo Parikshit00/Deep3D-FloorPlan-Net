@@ -1,7 +1,6 @@
 import os
 import json
 import math
-import datetime
 import numpy as np
 import yaml
 import cv2
@@ -14,6 +13,7 @@ from ezdxf.addons.drawing import matplotlib as dxf_mpl
 CLASSES = ["floor", "ceiling", "walls", "window", "door", "column"]
 DEFAULT_CFG = "../configs/floorplan.yml"
 S = 1000.0
+WHITE = 0xFFFFFF
 
 def load_cfg(path):
     with open(path) as f:
@@ -125,6 +125,20 @@ def room_from_floor_obb(floor_pts, ang):
     corners = np.array([[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]])
     return Polygon(rot(corners, ang))
 
+def quantize_ortho(room, ang):
+    v = rot(np.array(room.exterior.coords[:-1]), -ang)
+    n = len(v)
+    horiz = [abs(v[(i + 1) % n, 0] - v[i, 0]) >= abs(v[(i + 1) % n, 1] - v[i, 1]) for i in range(n)]
+    val = [round((v[i, 1] + v[(i + 1) % n, 1]) / 2, 3) if horiz[i] else round((v[i, 0] + v[(i + 1) % n, 0]) / 2, 3) for i in range(n)]
+    out = []
+    for i in range(n):
+        p = (i - 1) % n
+        if horiz[p] != horiz[i]:
+            out.append([val[i] if not horiz[i] else val[p], val[i] if horiz[i] else val[p]])
+        else:
+            out.append([round(v[i, 0], 3), round(v[i, 1], 3)])
+    return np.array(out)
+
 def detect_openings(room, sub, op):
     coords = list(room.exterior.coords)
     edges = list(zip(coords[:-1], coords[1:]))
@@ -214,12 +228,13 @@ def draw_opening(msp, o, cen, th, swing):
     if o["type"] == "door":
         hinge = p
         r = min(L, swing)
-        msp.add_line(hinge, hinge + inrm * r, dxfattribs={"layer": "A-DOOR"})
+        da = {"layer": "A-DOOR", "true_color": WHITE, "lineweight": 50}
+        msp.add_line(hinge, hinge + inrm * r, dxfattribs=da)
         a0 = math.degrees(math.atan2(u[1], u[0]))
         a1 = math.degrees(math.atan2(inrm[1], inrm[0]))
         if (a1 - a0) % 360 > 180:
             a0, a1 = a1, a0
-        msp.add_arc(hinge, r, a0, a1, dxfattribs={"layer": "A-DOOR"})
+        msp.add_arc(hinge, r, a0, a1, dxfattribs=da)
     else:
         for off in (th / 2, 0.0, -th / 2):
             msp.add_line(p + nrm * off, q + nrm * off, dxfattribs={"layer": "A-GLAZ"})
@@ -234,27 +249,37 @@ def dim_style(doc, th_txt):
         ds.dxf.dimgap = th_txt * 0.3
         ds.dxf.dimdec = 0
 
-def add_dims(msp, ext_mm, cen, off):
-    for a, b in zip(ext_mm[:-1], ext_mm[1:]):
-        a, b = np.array(a), np.array(b)
-        L = np.linalg.norm(b - a)
-        if L < 900:
-            continue
-        u = (b - a) / L
-        out = np.array([-u[1], u[0]])
-        if np.dot(out, (a + b) / 2 - cen) < 0:
-            out = -out
-        base = (a + b) / 2 + out * off
-        ang = 0 if abs(u[0]) >= abs(u[1]) else 90
-        msp.add_linear_dim(base=tuple(base), p1=tuple(a), p2=tuple(b), angle=ang,
-                           dimstyle="PLAN", dxfattribs={"layer": "A-DIMS"}).render()
+def stations(coords, min_seg):
+    s = sorted(set(int(round(c)) for c in coords))
+    keep = [s[0]]
+    for v in s[1:-1]:
+        if v - keep[-1] >= min_seg:
+            keep.append(v)
+    keep.append(s[-1])
+    while len(keep) > 2 and keep[-1] - keep[-2] < min_seg:
+        keep.pop(-2)
+    return keep
 
-def add_overall_dims(msp, bounds_mm, off):
-    x0, y0, x1, y1 = bounds_mm
-    msp.add_linear_dim(base=(0, y0 - off), p1=(x0, y0), p2=(x1, y0), angle=0,
-                       dimstyle="PLAN", dxfattribs={"layer": "A-DIMS"}).render()
-    msp.add_linear_dim(base=(x0 - off, 0), p1=(x0, y0), p2=(x0, y1), angle=90,
-                       dimstyle="PLAN", dxfattribs={"layer": "A-DIMS"}).render()
+def add_chain(msp, sts, ref, off, off_overall, horizontal):
+    da = {"layer": "A-DIMS"}
+    if len(sts) > 2:
+        line = ref - off
+        for a, b in zip(sts[:-1], sts[1:]):
+            if horizontal:
+                msp.add_linear_dim(base=(0, line), p1=(a, ref), p2=(b, ref), angle=0,
+                                   dimstyle="PLAN", dxfattribs=da).render()
+            else:
+                msp.add_linear_dim(base=(line, 0), p1=(ref, a), p2=(ref, b), angle=90,
+                                   dimstyle="PLAN", dxfattribs=da).render()
+        oline = ref - off_overall
+    else:
+        oline = ref - off
+    if horizontal:
+        msp.add_linear_dim(base=(0, oline), p1=(sts[0], ref), p2=(sts[-1], ref), angle=0,
+                           dimstyle="PLAN", dxfattribs=da).render()
+    else:
+        msp.add_linear_dim(base=(oline, 0), p1=(ref, sts[0]), p2=(ref, sts[-1]), angle=90,
+                           dimstyle="PLAN", dxfattribs=da).render()
 
 def add_scale_bar(msp, x, y, th_txt):
     seg = 1000.0
@@ -273,12 +298,15 @@ def add_scale_bar(msp, x, y, th_txt):
     msp.add_text("metres", height=th_txt * 0.7, dxfattribs={"layer": "A-ANNO"}).set_placement(
         (x + 4 * seg + th_txt, y), align=TextEntityAlignment.LEFT)
 
-def add_north(msp, x, y, r):
-    msp.add_line((x, y - r), (x, y + r), dxfattribs={"layer": "A-ANNO"})
-    for dx in (-r * 0.35, r * 0.35):
-        msp.add_line((x + dx, y + r * 0.4), (x, y + r), dxfattribs={"layer": "A-ANNO"})
+def add_north(msp, c, r, ndir):
+    ndir = ndir / (np.linalg.norm(ndir) + 1e-9)
+    perp = np.array([-ndir[1], ndir[0]])
+    tip = c + ndir * r
+    msp.add_line(tuple(c - ndir * r), tuple(tip), dxfattribs={"layer": "A-ANNO"})
+    msp.add_line(tuple(tip - ndir * r * 0.4 + perp * r * 0.3), tuple(tip), dxfattribs={"layer": "A-ANNO"})
+    msp.add_line(tuple(tip - ndir * r * 0.4 - perp * r * 0.3), tuple(tip), dxfattribs={"layer": "A-ANNO"})
     msp.add_text("N", height=r * 0.6, dxfattribs={"layer": "A-ANNO"}).set_placement(
-        (x, y + r * 1.3), align=TextEntityAlignment.CENTER)
+        tuple(tip + ndir * r * 0.5), align=TextEntityAlignment.MIDDLE_CENTER)
 
 def add_legend(msp, x, y, th_txt):
     dy = th_txt * 2.0
@@ -295,8 +323,13 @@ def add_legend(msp, x, y, th_txt):
             h.set_solid_fill()
             h.paths.add_polyline_path([(x, ry), (x + sw, ry), (x + sw, ry + sw), (x, ry + sw)], is_closed=True)
         elif label == "DOOR":
-            msp.add_line((x, ry), (x, ry + sw), dxfattribs={"layer": "A-LEGEND"})
-            msp.add_arc((x, ry), sw, 0, 90, dxfattribs={"layer": "A-LEGEND"})
+            h = msp.add_hatch(dxfattribs={"layer": "A-LEGEND"})
+            h.rgb = (110, 110, 110)
+            h.set_solid_fill()
+            h.paths.add_polyline_path([(x, ry), (x + sw, ry), (x + sw, ry + sw), (x, ry + sw)], is_closed=True)
+            da = {"layer": "A-LEGEND", "true_color": WHITE, "lineweight": 50}
+            msp.add_line((x, ry), (x, ry + sw), dxfattribs=da)
+            msp.add_arc((x, ry), sw, 0, 90, dxfattribs=da)
         elif label == "WINDOW":
             for off in (0.0, sw / 2, sw):
                 msp.add_line((x, ry + off), (x + sw, ry + off), dxfattribs={"layer": "A-LEGEND"})
@@ -310,9 +343,8 @@ def add_legend(msp, x, y, th_txt):
 def add_title_block(msp, x0, y0, w, h, th_txt, area, scale):
     msp.add_lwpolyline([(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h)],
                        close=True, dxfattribs={"layer": "A-TTLB"})
-    rows = [("PROJECT", "Deep3D-FloorPlan-Net"), ("DRAWING", "Ground Floor Plan"),
-            ("SCALE", f"1:{scale}"), ("UNITS", "mm"), ("AREA", f"{area:.1f} m2"),
-            ("DATE", datetime.date.today().isoformat()), ("DRAWN", "Deep3D")]
+    rows = [("DRAWING", "Ground Floor Plan"), ("SCALE", f"1:{scale}"),
+            ("UNITS", "mm"), ("AREA", f"{area:.2f} m2")]
     rh = h / len(rows)
     for i, (k, v) in enumerate(rows):
         ry = y0 + h - (i + 1) * rh
@@ -322,51 +354,54 @@ def add_title_block(msp, x0, y0, w, h, th_txt, area, scale):
         msp.add_text(v, height=th_txt * 0.8, dxfattribs={"layer": "A-TTLB"}).set_placement(
             (x0 + w * 0.4, ry + rh / 2), align=TextEntityAlignment.MIDDLE_LEFT)
 
-def export_drawing(out_base, room, openings, columns, cfg):
+def export_drawing(out_base, fv, openings, columns, ang, area_m2, cfg):
     thickness = cfg["wall_thickness"]
     scale = cfg["drawing"]["scale"]
     swing = cfg["drawing"]["door_swing_max"] * S
+    min_seg = cfg["drawing"]["min_seg"] * S
     doc = ezdxf.new("R2010", setup=True)
     doc.units = ezdxf.units.MM
     msp = doc.modelspace()
     setup_layers(doc)
 
-    ext = np.array(room.exterior.coords) * S
-    cen = np.array(room.centroid.coords[0]) * S
-    inner = room.buffer(-thickness)
+    poly = Polygon(fv)
+    ext = fv * S
+    cen = np.array(poly.centroid.coords[0]) * S
+    inner = poly.buffer(-thickness)
     inner_mm = np.array(inner.exterior.coords) * S if inner.geom_type == "Polygon" and not inner.is_empty else None
     th = thickness * S
-    x0, y0, x1, y1 = np.array(room.bounds) * S
-    w, h = x1 - x0, y1 - y0
-    mw = max(w, h)
+    x0, y0 = ext.min(0)
+    x1, y1 = ext.max(0)
+    mw = max(x1 - x0, y1 - y0)
     th_txt = max(150.0, mw / 45)
     dim_style(doc, th_txt)
 
     wall_band(msp, [tuple(c) for c in ext], [tuple(c) for c in inner_mm] if inner_mm is not None else None)
     for o in openings:
-        draw_opening(msp, o, cen, th, swing)
+        of = dict(o, p=rot(np.array(o["p"]), -ang).tolist(), q=rot(np.array(o["q"]), -ang).tolist())
+        draw_opening(msp, of, cen, th, swing)
     for i, c in enumerate(columns):
-        center = (c["center"][0] * S, c["center"][1] * S)
-        msp.add_circle(center, c["radius"] * S, dxfattribs={"layer": "A-COLS"})
+        ctr = tuple(rot(np.array(c["center"]), -ang) * S)
+        msp.add_circle(ctr, c["radius"] * S, dxfattribs={"layer": "A-COLS"})
         msp.add_text(f"C{i + 1}", height=th_txt * 0.7, dxfattribs={"layer": "A-COLS"}).set_placement(
-            center, align=TextEntityAlignment.MIDDLE_CENTER)
+            ctr, align=TextEntityAlignment.MIDDLE_CENTER)
 
-    add_dims(msp, [tuple(c) for c in ext], cen, th + th_txt * 1.5)
-    overall_off = th + th_txt * 5.0
-    add_overall_dims(msp, (x0, y0, x1, y1), overall_off)
+    off, off_overall = th + th_txt * 1.8, th + th_txt * 5.5
+    add_chain(msp, stations(ext[:, 0], min_seg), y0, off, off_overall, True)
+    add_chain(msp, stations(ext[:, 1], min_seg), x0, off, off_overall, False)
 
-    msp.add_mtext(f"ROOM\\P{room.area:.1f} m2", dxfattribs={
-        "layer": "A-ANNO", "char_height": th_txt, "attachment_point": 5}).set_location(tuple(cen))
+    msp.add_text("ROOM", height=th_txt, dxfattribs={"layer": "A-ANNO", "true_color": WHITE}).set_placement(
+        tuple(cen), align=TextEntityAlignment.MIDDLE_CENTER)
 
-    sb_y = y0 - (th + th_txt * 8.5)
+    sb_y = y0 - (th + th_txt * 9.5)
     add_scale_bar(msp, x0, sb_y, th_txt)
-    add_north(msp, x1 + mw * 0.10, y1 + th_txt * 2, th_txt * 1.6)
+    add_north(msp, np.array([x1 + mw * 0.10, y1 + th_txt * 2]), th_txt * 1.6, rot(np.array([0.0, 1.0]), -ang))
     lx = x1 + mw * 0.20
     add_legend(msp, lx, y1, th_txt)
-    tb_w, tb_h = mw * 0.5, th_txt * 11.0
-    add_title_block(msp, lx, y0, tb_w, tb_h, th_txt, room.area, scale)
+    tb_w, tb_h = mw * 0.5, th_txt * 8.0
+    add_title_block(msp, lx, y0, tb_w, tb_h, th_txt, area_m2, scale)
 
-    fx0 = x0 - overall_off - th_txt * 3
+    fx0 = x0 - off_overall - th_txt * 4
     fx1 = lx + tb_w + th_txt * 3
     fy0 = sb_y - th_txt * 3
     fy1 = y1 + th_txt * 6
@@ -510,15 +545,19 @@ def reconstruct(clouds, cfg):
     openings = detect_openings(room, clouds, cfg["openings"])
     columns = detect_columns(clouds["column"], room, cfg["columns"])
     floor_z, ceil_z = z_levels(clouds, cfg["ceiling_fallback_height"])
-    return room, openings, columns, floor_z, ceil_z, used
+    return room, openings, columns, floor_z, ceil_z, used, ang
 
 def generate(clouds, out_dir, cfg):
     os.makedirs(out_dir, exist_ok=True)
-    room, openings, columns, floor_z, ceil_z, method = reconstruct(clouds, cfg)
-    export_drawing(os.path.join(out_dir, "floor_plan"), room, openings, columns, cfg)
-    export_ifc(os.path.join(out_dir, "model.ifc"), room, openings, columns, floor_z, ceil_z, cfg["wall_thickness"])
-    info = {"method": method, "area_m2": round(room.area, 3),
-            "bounds": [round(v, 3) for v in room.bounds],
+    room, openings, columns, floor_z, ceil_z, method, ang = reconstruct(clouds, cfg)
+    align = ((ang + math.pi / 4) % (math.pi / 2)) - math.pi / 4
+    fv = quantize_ortho(room, align)
+    area_m2 = float(Polygon(fv).area)
+    room_q = Polygon(rot(fv, align))
+    export_drawing(os.path.join(out_dir, "floor_plan"), fv, openings, columns, align, area_m2, cfg)
+    export_ifc(os.path.join(out_dir, "model.ifc"), room_q, openings, columns, floor_z, ceil_z, cfg["wall_thickness"])
+    info = {"method": method, "area_m2": round(area_m2, 3),
+            "bounds": [round(v, 3) for v in room_q.bounds],
             "floor_z": round(floor_z, 3), "ceil_z": round(ceil_z, 3),
             "n_openings": len(openings), "n_columns": len(columns),
             "openings": openings, "columns": columns}

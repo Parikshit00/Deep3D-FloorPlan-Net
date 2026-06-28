@@ -224,7 +224,7 @@ The result is a watertight, metric room polygon $P_{\text{room}}$ that handles r
 
 The polygon and elements are emitted by `export_drawing` (sheet) and `export_ifc` (BIM). Coordinates are scaled from metres to millimetres, $c_{\text{mm}} = 1000\,c_{\text{m}}$, and drawn on standard CAD layers with wall poché (hatch), door swings, and window symbols.
 
-*   **Dimensions:** every wall run and the overall extents are auto-dimensioned. For an edge the annotated length is $L=\lVert \mathbf{b}-\mathbf{a} \rVert$, and the overall sizes are $W=x_{\max}-x_{\min}$ and $H=y_{\max}-y_{\min}$ (in mm).
+*   **Dimensions:** the outline is quantized to whole mm and dimensioned as closed **chains** placed outside the plan — a wall-segment string on each side plus the overall — so the partials sum exactly to the overall ($\sum \text{segments} = x_{\max}-x_{\min}$), per ISO 129-1 / architectural dimension-string practice. The reported AREA is the enclosed area of that same outline, keeping every number globally consistent.
 *   **Sheet:** a legend, title block (scale `drawing.scale`, units mm), scale bar, and north arrow are added. Outputs are **DXF** (editable CAD), **PDF/PNG** (rendered sheet), and **IFC** (parametric walls, slabs, openings, doors, windows, and columns).
 
 Final Result:

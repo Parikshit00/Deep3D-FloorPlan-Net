@@ -38,3 +38,4 @@ ceiling_fallback_height: 2.5  # storey height used when no ceiling points (m)
 drawing:
   scale: 50                   # sheet scale 1:N
   door_swing_max: 1.0         # cap door swing arc radius (m)
+  min_seg: 0.05               # merge wall stations closer than this (m) when dimensioning
